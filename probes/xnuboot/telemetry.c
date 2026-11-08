@@ -91,6 +91,8 @@ static void console_put(struct context *c, uint8_t byte)
         c->console[c->console_len++] = byte;
     else
         c->console_dropped++;
+
+    fb_con_put(byte);
 }
 
 /* One out-of-memory mapping, folded into the span table.

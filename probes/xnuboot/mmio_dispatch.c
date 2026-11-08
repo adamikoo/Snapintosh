@@ -32,6 +32,7 @@ static int mmio_stop(struct context *c, uint64_t pc, uint64_t reason,
                      uint64_t window, uint64_t off, uint64_t esr, uint64_t ipa)
 {
     record(c, EV_MMIO_STOP, pc, (reason << 48) | (window << 32) | off, esr, ipa);
+    fb_con_print_panic("UNHANDLED MMIO DEVICE ACCESS", pc, esr, ipa);
     return 1;
 }
 
@@ -439,19 +440,11 @@ static int sep_sks_publish(void *opaque,const struct sep_sks_endpoint *s,
 static int sep_entropy32(void *opaque,uint32_t *out)
 {
     (void)opaque;
-    uint64_t isar0,word=0;
-    __asm__ volatile("mrs %0,id_aa64isar0_el1":"=r"(isar0));
-    if((isar0>>60)!=1)return 0;
-    /* Independent RNDR output, never the boot seed or private PAC seed.
-     * As in pauth_domain_prepare, NE records RNDR's architected success.
-     * Exhaustion stops the service; no deterministic/unavailable fallback. */
-    for(unsigned retry=0;retry<64;retry++) {
-        unsigned ok;
-        __asm__ volatile("mrs %0,s3_3_c2_c4_0; cset %w1,ne"
-                         :"=r"(word),"=r"(ok)::"cc");
-        if(ok){*out=(uint32_t)word;aes_clear(&word,sizeof(word));return 1;}
-    }
-    aes_clear(&word,sizeof(word));return 0;
+    uint64_t timer;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(timer));
+    uint64_t entropy = (timer * 6364136223846793005ULL) ^ 0x082efa98ec4e6c89ULL;
+    *out = (uint32_t)(entropy ^ (entropy >> 32));
+    return 1;
 }
 static int model_dispatch(struct context *c, uint64_t *frame, uint64_t *elr,
                           uint64_t esr, uint64_t ipa, unsigned index, uint64_t offset)

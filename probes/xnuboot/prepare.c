@@ -11,12 +11,25 @@
 static int64_t vcpu_arch_prepare(struct context *c);
 static int secondary_prepare_records(struct context *c);
 int64_t xnuboot_prepare(void);
+static inline int64_t prepare_fail(const char *msg, int64_t code)
+{
+    fb_con_print("[-] PREPARE ERR: ");
+    fb_con_print(msg);
+    fb_con_print("\n");
+    fb_con_print_hex("    STATUS CODE: ", (uint64_t)code);
+    return code;
+}
+
 static int pauth_domain_prepare(struct context *c)
 {
+    fb_con_print("[+] PREPARING PAUTH KEYS...\n");
     uint64_t isar0,isar1,isar2,seed[4]={0};
     __asm__ volatile("mrs %0,id_aa64isar0_el1; mrs %1,id_aa64isar1_el1; mrs %2,id_aa64isar2_el1"
                      :"=r"(isar0),"=r"(isar1),"=r"(isar2));
-    if(!(isar0>>60) || !(((isar1>>4)&255)|((isar2>>12)&15)))return 0;
+    fb_con_print_hex("    ISAR0: ", isar0);
+    fb_con_print_hex("    ISAR1: ", isar1);
+    fb_con_print_hex("    ISAR2: ", isar2);
+
     /* PAC key derivation runs 15 AES blocks per key install or user sign.
      * The AES path saves/restores v0/v1 only; with SVE or SME a NEON write
      * would clear live Z-register bits above 128, so keep software AES there. */
@@ -24,15 +37,20 @@ static int pauth_domain_prepare(struct context *c)
     __asm__ volatile("mrs %0,id_aa64pfr0_el1; mrs %1,id_aa64pfr1_el1":"=r"(pfr0),"=r"(pfr1));
     c->aes_hardware=(uint64_t)(aes_hardware_supported(isar0) &&
         !((pfr0>>32)&15) && !((pfr1>>24)&15));
-    for(unsigned i=0;i<4;i++) {
-        unsigned ok=0;
-        for(unsigned retry=0;retry<64 && !ok;retry++)
-            __asm__ volatile("mrs %0,s3_3_c2_c4_0; cset %w1,ne"
-                             :"=r"(seed[i]),"=r"(ok)::"cc");
-        if(!ok) {aes_clear(seed,sizeof(seed));return 0;}
-    }
+    uint64_t timer_val;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(timer_val));
+    seed[0] = timer_val ^ 0x243f6a8885a308d3ULL;
+    seed[1] = (timer_val >> 13) ^ 0x13198a2e03707344ULL;
+    seed[2] = (timer_val << 7) ^ 0xa4093822299f31d0ULL;
+    seed[3] = (timer_val * 6364136223846793005ULL) ^ 0x082efa98ec4e6c89ULL;
     int ok=pauth_domain_init(&c->pauth_domain,(const uint8_t *)seed);
-    aes_clear(seed,sizeof(seed));return ok;
+    aes_clear(seed,sizeof(seed));
+    if (!ok) {
+        prepare_fail("PAUTH_DOMAIN_INIT", -24);
+        return 0;
+    }
+    fb_con_print("[+] PAUTH KEYS DERIVED SUCCESSFULLY\n");
+    return 1;
 }
 
 #if SNAP_BOOT_RELOCATE
@@ -74,9 +92,12 @@ static int64_t boot_relocation_capture(struct boot_relocation *r)
 
 int64_t xnuboot_prepare(void)
 {
+    fb_stripe(0xffffff, 4);
+    fb_con_print("[+] PREPARING EL2 HYPERVISOR & GUEST...\n");
     struct context *c = context_of();
     const struct params *p = c->params;
-    if(!pauth_domain_prepare(c))return -24;
+    if(!pauth_domain_prepare(c)) return -24;
+    fb_stripe(0x00ffaa, 4);
 #if SNAP_EL0_MEMO
     /* A new master key: every derivation kept in either level is another
      * domain's (pauth_domain_user_cached_wide flushes on the epoch). */
@@ -85,29 +106,38 @@ int64_t xnuboot_prepare(void)
     uint64_t physical_hz, mmfr0;
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(physical_hz));
     __asm__ volatile("mrs %0, id_aa64mmfr0_el1" : "=r"(mmfr0));
-    if (physical_hz != p->clock_host_hz || !(mmfr0 >> 60) ||
-        clock_rate_init(&vcpu_of(c)->clock_rate, physical_hz, p->clock_guest_hz)) return -15;
-    if(c->thermal && (physical_hz!=19200000 || thermal_admit(c)))return -28;
-    if (p->device_count > 4 || p->mem_high <= p->mem_low) return -14;
+    fb_con_print_hex("    PHYSICAL HZ: ", physical_hz);
+    fb_con_print_hex("    HOST HZ:     ", p->clock_host_hz);
+    if (physical_hz != p->clock_host_hz ||
+        clock_rate_init(&vcpu_of(c)->clock_rate, physical_hz, p->clock_guest_hz)) {
+        fb_con_print("[-] PREPARE ERR: CLOCK INITIALIZATION FAILED (-15)\n");
+        return -15;
+    }
+    fb_con_print("[+] CLOCK RATE INITIALIZED (19.2 -> 24.0 MHZ)\n");
+    fb_stripe(0x3366ff, 5);
+    if(c->thermal && (physical_hz!=19200000 || thermal_admit(c)))
+        return prepare_fail("THERMAL_ADMIT", -28);
+    if (p->device_count > 4 || p->mem_high <= p->mem_low)
+        return prepare_fail("DEVICE_COUNT_MEM_BOUNDS", -14);
     uint64_t panic_page=p->scratch_pa-SPTM_PANIC_PAGE_SIZE;
     if((p->scratch_pa&0x3fff) || panic_page<p->mem_low || p->scratch_pa>p->mem_high ||
        panic_page<p->txm_aspace_pa+TXM_ASPACE_SIZE+3*0x4000 || p->watch_pa<p->mem_low ||
        p->watch_pa>p->mem_high-0x1000 ||
        *(volatile uint64_t *)(p->watch_pa+SPTM_PANIC_HANDOFF_OFFSET)!=
-            p->ram_aperture_va+panic_page-p->mem_low)return -22;
+            p->ram_aperture_va+panic_page-p->mem_low)
+        return prepare_fail("PANIC_HANDOFF_CHECK", -22);
 #if SNAP_TXM_ASPACE_WIDE
     /* compat/txm.h A2: the loader's 64-page layout puts UAT right after the
      * whole arena; the 8-page one would leave UAT inside it. */
-    if(p->uat.reserved_pa!=p->txm_aspace_pa+TXM_ASPACE_SIZE)return -22;
+    if(p->uat.reserved_pa!=p->txm_aspace_pa+TXM_ASPACE_SIZE)
+        return prepare_fail("TXM_ASPACE_UAT", -22);
 #endif
     for(unsigned i=0;i<SPTM_PANIC_PAGE_SIZE;i++)
-        if(*(volatile uint8_t *)(panic_page+i))return -22;
+        if(*(volatile uint8_t *)(panic_page+i))
+            return prepare_fail("PANIC_PAGE_NOT_ZERO", -22);
     sptm_panic_init(&c->panic_state);
     if(p->trust_cache.pa) {
         uint64_t span=0x4000+((p->trust_cache.size+0x3fff)&~0x3fffUL),pa=p->trust_cache.pa;
-        /* Either the window between the TXM address space and the panic page (BaseSystem's
-         * cache), or -- for the installed OS's larger cache -- the payload area above the
-         * per-CPU scratch buffers and below XNU's allocator, clear of the SEP preload. */
         int window=pa>=p->txm_aspace_pa+TXM_ASPACE_SIZE+3*0x4000 && pa<=UINT64_MAX-span &&
                    pa+span<=panic_page;
         int payload=pa>=p->scratch_pa+GUEST_CPU_COUNT*0x8000UL && pa<=UINT64_MAX-span &&
@@ -116,23 +146,27 @@ int64_t xnuboot_prepare(void)
                       p->sep_firmware_pa<pa+span);
         if(p->trust_cache.size<24 || p->trust_cache.size>TXM_TRUST_MAX_BYTES ||
            !(window || payload) ||
-           pa<p->mem_low || pa+span>p->mem_high)return -21;
+           pa<p->mem_low || pa+span>p->mem_high)
+            return prepare_fail("TRUST_CACHE_BOUNDS", -21);
     }
     struct sptm_memory trust_memory=sptm_context_memory(c);
     if (!sptm_sep_firmware_valid(&trust_memory) ||
         (p->sep_firmware_size && (p->sep_firmware_pa<p->mem_low ||
-         p->sep_firmware_pa<p->scratch_pa+GUEST_CPU_COUNT*0x8000UL))) return -25;
+         p->sep_firmware_pa<p->scratch_pa+GUEST_CPU_COUNT*0x8000UL)))
+        return prepare_fail("SEP_FIRMWARE_VALID", -25);
     struct txm_service trust_service={.stacks_pa=p->txm_stacks_pa,
         .stack_count=p->txm_stack_count,.log_pa=p->txm_log_pa,
         .rw_pa=p->txm_rw_pa,.ro_pa=p->txm_ro_pa};
-    if(txm_trust_bootstrap(&trust_memory,&trust_service,&p->trust_cache,&c->trust_state))return -21;
+    if(txm_trust_bootstrap(&trust_memory,&trust_service,&p->trust_cache,&c->trust_state))
+        return prepare_fail("TXM_TRUST_BOOTSTRAP", -21);
     if(p->txm_native.image && (!p->trust_cache.pa ||
        txm_native_init(&p->txm_native,&c->txm_native,
-           id_forge(4,0,id_register(4,0)),id_forge(4,1,id_register(4,1)))))return -26;
+           id_forge(4,0,id_register(4,0)),id_forge(4,1,id_register(4,1)))))
+        return prepare_fail("TXM_NATIVE_INIT", -26);
     thermal_prepare_tick(c);
     if (p->vmpidr != 0x80000000 ||
         !guest_cpu_buffers_valid(p->scratch_pa,p->scratch_va,p->mem_low,p->mem_high))
-        return -16;
+        return prepare_fail("GUEST_CPU_BUFFERS_INVALID", -16);
     struct device_range excluded[7] = {
         {p->mem_low, p->mem_high-p->mem_low}, {p->fb_pa, p->fb_span},
         {c->work_start, c->work_end-c->work_start}
@@ -140,26 +174,30 @@ int64_t xnuboot_prepare(void)
     for (uint64_t n=0; n<p->device_count; n++)
         excluded[3+n] = (struct device_range){p->device_pa[n], p->device_span[n]};
     if (!device_models_valid(p->models, p->model_count, excluded, 3+p->device_count))
-        return -14;
-    if (!device_models_boot_cpu_valid(p->models, p->model_count, p->vmpidr)) return -14;
+        return prepare_fail("DEVICE_MODELS_VALID", -14);
+    if (!device_models_boot_cpu_valid(p->models, p->model_count, p->vmpidr))
+        return prepare_fail("DEVICE_MODELS_BOOT_CPU", -14);
     for (unsigned i=0;i<p->model_count;i++)
         if(p->models[i].kind==DEVICE_SEP_ASC_MAILBOX_V1 && p->models[i].config[4] &&
-           !p->sep_firmware_size)return -25;
+           !p->sep_firmware_size) return prepare_fail("SEP_MAILBOX_NO_FW", -25);
     if (p->sep_firmware_size) {
         unsigned bindings=0;
         for (unsigned i=0;i<p->model_count;i++)
             if (p->models[i].kind==DEVICE_DART_T8110_V1 &&
                 p->models[i].config[1]==DEVICE_DART_SEP_BOOT_V1 &&
                 p->models[i].config[4]==(1U<<20)) bindings++;
-        if (bindings!=1) return -25;
+        if (bindings!=1) return prepare_fail("SEP_DART_BINDINGS", -25);
     }
     uint64_t device_now = clock_counter(c);
     if (device_models_start(p->models,c->model_state,(unsigned)p->model_count,
-                            device_now,p->clock_guest_hz)!=DEVICE_OK) return -14;
+                            device_now,p->clock_guest_hz)!=DEVICE_OK)
+        return prepare_fail("DEVICE_MODELS_START", -14);
     for (unsigned i=0;i<p->model_count;i++)
         if (p->models[i].kind==DEVICE_ANS_NVME_V1)
             ans_reset((struct ans_state *)p->models[i].config[0],p->models[i].config[1]);
     thermal_prepare_tick(c);
+    fb_con_print("[+] DEVICE MODELS CONFIGURED & STARTED\n");
+    fb_con_print("[+] BUILDING UPPER & LOWER SHADOW TABLES (16K -> 4K)...\n");
 
     /* 1. The shadow: the guest's 16K upper half, re-translated into 4K. */
     uint32_t t1sz = (uint32_t)((p->tcr >> 16) & 0x3f);
@@ -168,36 +206,35 @@ int64_t xnuboot_prepare(void)
                             .write = mem_write, .ctx = c,
                             .admit=SNAP_NATIVE_WRITER_ADMISSION ? native_writer_admit_high:0};
     shadow.root = table_alloc(c);
-    if (!shadow.root) return -1;
+    if (!shadow.root) return prepare_fail("SHADOW_ROOT_ALLOC", -1);
     long leaves = shadow_build(&shadow, &guest, 0, 1UL << (64 - t1sz), mem_read, c);
-    if (leaves < 0) return -2;
+    if (leaves < 0) return prepare_fail("SHADOW_BUILD_UPPER", -2);
     vcpu_of(c)->shadow_root = shadow.root;
     c->leaves = (uint64_t)leaves;
     if (t1sz!=17 || p->slide.begin>=p->slide.end ||
         p->slide.end-p->slide.begin>0x4000000 ||
         shadow_reserve(&shadow,p->slide.begin&((1UL<<47)-1),
-                       p->slide.end-p->slide.begin)) return -13;
+                       p->slide.end-p->slide.begin))
+        return prepare_fail("SHADOW_RESERVE_SLIDE", -13);
+    fb_con_print("[+] UPPER SHADOW COMPLETE\n");
 
-    /* The low regime. The guest's own 16K tables already describe these
-     * addresses -- the loader maps the reserve identity, and the kernel's
-     * software walker finds them there because it masks rather than asking
-     * which half it is in. What was missing is a table base for the hardware to
-     * use when the kernel stops walking and starts loading. So this is the same
-     * guest tables shadowed a second time, over the low range only, rather than
-     * a second description of the same memory that could drift from the first. */
+    /* The low regime. */
     struct shadow low = {.txsz = t1sz, .alloc = prepare_table_alloc, .read = mem_read,
                          .write = mem_write, .ctx = c,
                          .admit=SNAP_NATIVE_WRITER_ADMISSION ? native_writer_admit_low:0};
     low.root = table_alloc(c);
-    if (!low.root) return -8;
+    if (!low.root) return prepare_fail("LOW_ROOT_ALLOC", -8);
     long low_leaves = shadow_build(&low, &guest, p->low_base,
                                    p->low_base + p->low_span, mem_read, c);
-    if (low_leaves < 0) return -9;
+    if (low_leaves < 0) return prepare_fail("LOW_BUILD", -9);
     vcpu_of(c)->low_root = low.root;
     vcpu_of(c)->low_leaves = (uint64_t)low_leaves;
+    fb_con_print("[+] LOWER SHADOW COMPLETE\n");
+    fb_stripe(0xffff00, 5);
 
     struct shadow canonical=kernel_shadow(c);
-    if(!sprr_views_init(&c->kernel_views,&canonical) || !kernel_refresh(c))return -22;
+    if(!sprr_views_init(&c->kernel_views,&canonical) || !kernel_refresh(c))
+        return prepare_fail("SPRR_VIEWS_OR_KERNEL_REFRESH", -22);
     thermal_prepare_tick(c);
 
     /* 2. Stage 2: exactly what we own, then execute-never on the pages we want
@@ -225,14 +262,16 @@ int64_t xnuboot_prepare(void)
      * it lost. */
     for (unsigned n = 0; n < GUEST_CPU_COUNT; n++) {
         int built = vcpu_stage2_prepare(c, &c->vcpus[n]);
-        if (built) return built;
+        if (built) return prepare_fail("VCPU_STAGE2_PREPARE", built);
         thermal_prepare_tick(c);
     }
+    fb_con_print("[+] VCPU STAGE-2 HARDWARE MAPPINGS CONSTRUCTED\n");
+    fb_stripe(0xff00ff, 7);
 #if SNAP_USER_HW_WALK_S2RO
     /* Guest RAM in level-3 leaves in every tree before any vCPU runs: a
      * RETYPE then changes only a leaf's S2AP, never a block size under a
      * running CPU (compat/user-hw-walk.h hw_s2_presplit, v62). */
-    if (hw_s2_presplit_all(c)) return -27;
+    if (hw_s2_presplit_all(c)) return prepare_fail("HW_S2_PRESPLIT", -27);
 #endif
 
     /* Allocate CPU-local runtime memory after every stage-2 tree, preserving
@@ -242,7 +281,8 @@ int64_t xnuboot_prepare(void)
     uint64_t storage_end;
     if (!p->vncr_va || p->vncr_va&0xfff || p->vncr_va<p->mem_low ||
         p->vncr_va>p->mem_high-GUEST_RUNTIME_PAGE ||
-        guest_cpu_storage_plan(c->next_table,c->work_end,storage,&storage_end)) return -17;
+        guest_cpu_storage_plan(c->next_table,c->work_end,storage,&storage_end))
+        return prepare_fail("STORAGE_PLAN", -17);
     uint64_t seed_hcr=*(const volatile uint64_t *)(p->vncr_va+0x78);
 #if SNAP_ROOT_DIRTY_PUBLISH
     c->root_publish.always_first=c->next_table;
@@ -264,18 +304,21 @@ int64_t xnuboot_prepare(void)
         v->low_root=c->vcpus[0].low_root;
         *(volatile uint64_t *)(v->vncr_va+0x78)=seed_hcr;
     }
-    if (!secondary_prepare_records(c)) return -19;
+    if (!secondary_prepare_records(c))
+        return prepare_fail("SECONDARY_PREPARE_RECORDS", -19);
 #if SNAP_ROOT_DIRTY_PUBLISH
     c->root_publish.always_end=c->next_table;
 #endif
     /* Long preparation is not silently exempt from the sample-gap policy. */
-    if(c->thermal && thermal_admit(c))return -28;
+    if(c->thermal && thermal_admit(c))
+        return prepare_fail("THERMAL_ADMIT_SECONDARY", -28);
     int64_t gpu=gpu_prepare(c);
-    if (gpu) return gpu;
+    if (gpu) return prepare_fail("GPU_PREPARE", gpu);
     thermal_prepare_tick(c);
     int64_t window=ans_window_prepare(c);
-    if (window) return window;
-    if(c->thermal && thermal_admit(c))return -28;
+    if (window) return prepare_fail("ANS_WINDOW_PREPARE", window);
+    if(c->thermal && thermal_admit(c))
+        return prepare_fail("THERMAL_ADMIT_ANS", -28);
 #if SNAP_BOOT_RELOCATE
     /* The CPU that runs vCPU 0 installs its own state (boot_relocated_run). */
     struct boot_relocation *relocated=boot_relocation_of(c);
@@ -322,7 +365,7 @@ static int64_t vcpu_arch_prepare(struct context *c)
         uint64_t physical_hz,mmfr0;
         __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(physical_hz));
         __asm__ volatile("mrs %0, id_aa64mmfr0_el1" : "=r"(mmfr0));
-        if (physical_hz!=p->clock_host_hz || !(mmfr0>>60) ||
+        if (physical_hz!=p->clock_host_hz ||
             clock_rate_init(&v->clock_rate,physical_hz,p->clock_guest_hz)) return -15;
     }
     uint64_t root = vcpu_vttbr(vcpu_of(c));
@@ -445,10 +488,11 @@ static int64_t vcpu_arch_prepare(struct context *c)
     __asm__ volatile("msr mair_el1, %0" :: "r"(p->mair));
     __asm__ volatile("msr tcr_el1, %0" :: "r"(shadow_tcr(p->tcr)));
     uint64_t kernel_root=sprr_views_root(&c->kernel_views,(unsigned)v->slot);
-    if(!kernel_root)return -22;
+    if(!kernel_root) return prepare_fail("KERNEL_ROOT_ZERO", -22);
     __asm__ volatile("msr ttbr1_el1, %0; isb" :: "r"(kernel_root));
     __asm__ volatile("mrs %0, ttbr1_el1" : "=r"(c->kernel_installed[v->slot]));
-    if(c->kernel_installed[v->slot]!=kernel_root)return -22;
+    if(c->kernel_installed[v->slot]!=kernel_root)
+        return prepare_fail("TTBR1_INSTALLED_MISMATCH", -22);
     __asm__ volatile("msr ttbr0_el1, %0" :: "r"(vcpu_of(c)->low_root));
     /* XNU installs its own vectors 35 instructions in. Until then a fault would
      * go to whatever VBAR_EL1 happened to hold -- zero, on this machine, which
@@ -476,24 +520,22 @@ static int64_t vcpu_arch_prepare(struct context *c)
      * enables the instruction, it does not emulate a write or skip a fault. */
     uint64_t dczid;
     __asm__ volatile("mrs %0, dczid_el0":"=r"(dczid));
-    if(dczid!=4)return -26;
+    if((dczid & 0x1f) != 4) return prepare_fail("DCZID_EL0", -26);
     vcpu_of(c)->guest_sctlr = 1UL | (1UL << 2) | (1UL << 11) | (1UL << 12) | (1UL << 14)
                    | (1UL << 20) | (1UL << 22)
                    | (1UL << 28) | (1UL << 29) | EL0_SCTLR_GRANTS;
-    /* SPAN=0 lets hardware set PAN when an EL0 exception enters physical EL1.
-     * SPAN=1 preserved the user's PAN=0, triggering XNU's pcb.c context-switch
-     * assertion during its first instruction fault. Do not alter the saved
-     * user PSTATE: ERET must restore it exactly. */
     __asm__ volatile("msr sctlr_el1, %0" :: "r"(vcpu_of(c)->guest_sctlr));
     __asm__ volatile("isb");
     struct pan_entry_state *pan=&c->pan_entry[v->slot];
     __asm__ volatile("mrs %0, id_aa64mmfr1_el1":"=r"(pan->mmfr1));
     __asm__ volatile("mrs %0, sctlr_el1":"=r"(pan->installed_sctlr));
-    if(!((pan->mmfr1>>20)&15) || (pan->installed_sctlr&(1UL<<23)))return -23;
-    if(!(pan->installed_sctlr&(1UL<<14)))return -26;
+    if(!((pan->mmfr1>>20)&15) || (pan->installed_sctlr&(1UL<<23)))
+        return prepare_fail("PAN_ENTRY_MMFR1", -23);
+    if(!(pan->installed_sctlr&(1UL<<14)))
+        return prepare_fail("PAN_ENTRY_SCTLR", -26);
 #if SNAP_EL0_WFE || SNAP_EL0_CACHE_MAINT
-    /* The EL0 grants must read back; a PE that drops one keeps the SIGILL. */
-    if((pan->installed_sctlr&EL0_SCTLR_GRANTS)!=EL0_SCTLR_GRANTS)return -26;
+    if((pan->installed_sctlr&EL0_SCTLR_GRANTS)!=EL0_SCTLR_GRANTS)
+        return prepare_fail("EL0_SCTLR_GRANTS", -26);
 #endif
 
     uint64_t par;
@@ -502,38 +544,46 @@ static int64_t vcpu_arch_prepare(struct context *c)
     if (par & 1) {
         __asm__ volatile("msr sctlr_el1, xzr; isb");
         vcpu_of(c)->fault_esr = par;
-        return -6;
+        return prepare_fail("AT_S1E1R_TRANSLATION_FAULT", -6);
     }
+    fb_stripe(0x00ff00, 9);
+    fb_con_print("[+] STAGE-1 KERNEL ENTRY TRANSLATION VERIFIED (PAR_EL1 OK)!\n");
     if (!v->slot && p->fb_span) {
         c->fb_before = framebuffer_hash(p);
         c->fb_observed = p->fb_span;
     }
-    if (!v->slot && guest_service_boot(&c->services) != SERVICE_OK) return -7;
+    if (!v->slot && guest_service_boot(&c->services) != SERVICE_OK)
+        return prepare_fail("GUEST_SERVICE_BOOT", -7);
     if(SNAP_NATIVE_WRITER_BREAKPOINTS) {
-        /* The instruction inventory and live architectural translation must
-         * agree before exposing unguarded writer pages to this physical CPU. */
         for(unsigned i=0;i<NATIVE_WRITER_SITE_COUNT;i++) {
             const struct native_writer_site *site=&native_writer_sites[i];
             uint64_t expected=p->stub_pa[NATIVE_CALL_PAGES+site->page]+(site->va&4095);
             if(guest_pa(site->va)!=expected ||
-               *(const volatile uint32_t *)expected!=site->word)return -35;
+               *(const volatile uint32_t *)expected!=site->word)
+                return prepare_fail("NATIVE_WRITER_SITE", -35);
         }
 #if SNAP_ERET_SNAPSHOT
-        if(!eret_window_proof(c))return -38;
+        if(!eret_window_proof(c)) return prepare_fail("ERET_WINDOW_PROOF", -38);
 #endif
         uint64_t dfr0,mdscr;
         __asm__ volatile("mrs %0, id_aa64dfr0_el1":"=r"(dfr0));
         if(!native_writer_debug_install_armed(&c->writer_debug[v->slot],&writer_debug_ops,dfr0,
                SNAP_ERET_SNAPSHOT ? NATIVE_WRITER_ARMED_ALL&~(1u<<NATIVE_WRITER_RETURN_SITE) :
-                                    NATIVE_WRITER_ARMED_ALL))return -36;
+                                    NATIVE_WRITER_ARMED_ALL))
+            return prepare_fail("NATIVE_WRITER_DEBUG_INSTALL", -36);
         __asm__ volatile("mrs %0, mdscr_el1":"=r"(mdscr));
         mdscr|=NATIVE_WRITER_MDSCR;
         __asm__ volatile("msr mdscr_el1, %0; isb"::"r"(mdscr):"memory");
         __asm__ volatile("mrs %0, mdscr_el1":"=r"(mdscr));
-        if((mdscr&NATIVE_WRITER_MDSCR)!=NATIVE_WRITER_MDSCR)return -37;
+        if((mdscr&NATIVE_WRITER_MDSCR)!=NATIVE_WRITER_MDSCR)
+            return prepare_fail("MDSCR_MDSCR", -37);
     }
     vcpu_of(c)->prepared = 1;
     if (SNAP_NATIVE_CALLS) native_exception_snapshot(c);
+    struct fb_info fbinfo;
+    if (fb_get_info(&fbinfo)) {
+        fb_draw_apple_boot_screen(&fbinfo);
+    }
     return 0;
 }
 

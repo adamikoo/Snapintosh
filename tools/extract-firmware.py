@@ -61,7 +61,11 @@ def im4p_payload(data: bytes) -> bytes:
 
 def decompress(payload: bytes, name: str) -> bytes:
     if payload[:4] == b'bvx2':
-        proc = subprocess.run(['lzfse', '-decode'], input=payload, capture_output=True)
+        lzfse_bin = 'lzfse'
+        local_lzfse = pathlib.Path(__file__).resolve().parent / 'lzfse.exe'
+        if local_lzfse.exists():
+            lzfse_bin = str(local_lzfse)
+        proc = subprocess.run([lzfse_bin, '-decode'], input=payload, capture_output=True)
         if proc.returncode or not proc.stdout:
             raise SystemExit(f'{name}: lzfse failed: {proc.stderr.decode()[:200]}')
         return proc.stdout

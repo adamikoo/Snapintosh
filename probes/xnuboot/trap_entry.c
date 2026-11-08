@@ -42,6 +42,18 @@ int xnuboot_trap(uint64_t *frame, uint64_t esr, uint64_t *elr);
 int xnuboot_trap(uint64_t *frame, uint64_t esr, uint64_t *elr)
 {
     struct context *c = context_of();
+    if (c->traps == 0) {
+        fb_con_print("[+] TRAP #1 FROM GUEST CAUGHT AT EL2!\n");
+        fb_con_print_hex("    PC:  ", *elr);
+        fb_con_print_hex("    ESR: ", esr);
+        fb_con_print_hex("    X16: ", frame[16]);
+    }
+    if (c->traps == 0) {
+        fb_con_print("[+] TRAP #1 FROM GUEST CAUGHT AT EL2!\n");
+        fb_con_print_hex("    PC:  ", *elr);
+        fb_con_print_hex("    ESR: ", esr);
+        fb_con_print_hex("    X16: ", frame[16]);
+    }
 #if SNAP_PAUTH_EL0_LIVE
     int crossed = 0;
     if ((esr >> 26) == 0x20 && c->pauth_bank[vcpu_of(c)->slot].active == 1) {

@@ -354,7 +354,7 @@ J700_26A428 = GuestProfile(
     # import_iboot_forwarded_roothash(0) consumes system-volume-auth-blob;
     # its separate argument-1 key belongs to mounting a BaseSystem DMG later.
     root_hash=RootHashSpec(
-        image_sha256='7cab6d690cf173c194e846079484b524c09da8909607ac808a4f2b936d272416',
+        image_sha256='7aacbbefadf4adcf830f72cd077b48e8a705a58636f177bba0efbabaf3910c2c',
         payload_sha256='e3d407ccea8443db1ae557b5477b6cb7cea9309e7f5760c9658a9d1f7b3b0353',
         payload_bytes=208,
         component='BaseSystemVolume',
@@ -368,13 +368,7 @@ J700_26A428 = GuestProfile(
         no_protected_data_recipe='/device-tree/osenvironments/darwinos-ramdisk-environment/no-protected-data-access',
         # seputil's own boot-mode branch explicitly skips SEP firmware loading.
         no_sep_firmware_recipe='/device-tree/osenvironments/darwinos-ramdisk-environment/no-sepfw-load-at-boot'),
-    trust_cache=TrustCacheSpec(
-        filename='basesystem-26A428.trustcache', component='Ap,BaseSystemTrustCache',
-        member='Firmware/022-20292-673.dmg.aea.trustcache',
-        component_sha256='f9382e7ea7ba858c48b033ab71b7fcfb74db6db53c97edaed1ef20893ceb70bc',
-        component_sha384='a200251abc0afa673c9b5653e979533f8f427a870a2f7410f61964f777f0de6d2512c9ccf52db0e170b7e39351664c31',
-        payload_sha256='09c90cd2bbd3dec0902341a73720da0bd36ce48427e0c1717875ffc4a9bd4ffd',
-        entries=1103),
+    trust_cache=None,
 )
 
 # Experimental software-board policy: the A16 does not implement Apple's

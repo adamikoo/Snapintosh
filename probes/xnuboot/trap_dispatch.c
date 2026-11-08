@@ -75,6 +75,7 @@ static int s2_fault_retry(struct context *c, uint64_t esr, uint64_t elr, uint64_
 
 static int xnuboot_trap_locked(uint64_t *frame, uint64_t esr, uint64_t *elr)
 {
+    fb_stripe(0xaa00ff, 10);
     struct context *c = context_of();
     const struct params *p = c->params;
     uint64_t ec = esr >> 26, iss = esr & 0x1ffffff;
@@ -442,6 +443,26 @@ static int xnuboot_trap_locked(uint64_t *frame, uint64_t esr, uint64_t *elr)
                     c->host_cpus->mask,ipa-UINT64_C(0x300734000),a.size,value,
 #endif
                     secondary_release,&request)) { *elr+=4;return 0; }
+            } else if (ipa>=UINT64_C(0x300734000) && ipa<=UINT64_C(0x300734020) &&
+                       !c->host_cpus && ec==0x24 && !(iss&(1U<<7))) {
+                /* When running in virtual or uniprocessor mode without host SMP release,
+                 * acknowledge CPU release writes and return zero for reads so boot CPU continues. */
+                struct dc_access a=dc_decode(esr);
+                if (a.valid) {
+                    if (!a.write && a.reg != 31) frame[a.reg] = 0;
+                    *elr += 4;
+                    return 0;
+                }
+            } else if (ipa>=UINT64_C(0x300734000) && ipa<=UINT64_C(0x300734020) &&
+                       !c->host_cpus && ec==0x24 && !(iss&(1U<<7))) {
+                /* When running in virtual or uniprocessor mode without host SMP release,
+                 * acknowledge CPU release writes and return zero for reads so boot CPU continues. */
+                struct dc_access a=dc_decode(esr);
+                if (a.valid) {
+                    if (!a.write && a.reg != 31) frame[a.reg] = 0;
+                    *elr += 4;
+                    return 0;
+                }
             }
             int window = dc_window(p->device_pa, p->device_span,
                                    p->device_count, ipa, &off);

@@ -171,13 +171,13 @@ static int vcpu_stage2_prepare(struct context *c, struct vcpu *v)
     struct shadow s2 = {.txsz = S2_TXSZ, .root = root, .alloc = table_alloc,
                         .read = mem_read, .write = mem_write, .ctx = c};
 #if SNAP_I2C_INPUT && SNAP_QCC2072_WIFI
-    struct stage2_range ranges[8 + I2C_INPUT_STAGE2_MAX + QCC2072_WIFI_STAGE2_MAX + SNAP_DISPLAY_TIMING_ROWS];
+    struct stage2_range ranges[12 + I2C_INPUT_STAGE2_MAX + QCC2072_WIFI_STAGE2_MAX + SNAP_DISPLAY_TIMING_ROWS];
 #elif SNAP_I2C_INPUT
-    struct stage2_range ranges[8 + I2C_INPUT_STAGE2_MAX + SNAP_DISPLAY_TIMING_ROWS];
+    struct stage2_range ranges[12 + I2C_INPUT_STAGE2_MAX + SNAP_DISPLAY_TIMING_ROWS];
 #elif SNAP_QCC2072_WIFI
-    struct stage2_range ranges[8 + QCC2072_WIFI_STAGE2_MAX + SNAP_DISPLAY_TIMING_ROWS];
+    struct stage2_range ranges[12 + QCC2072_WIFI_STAGE2_MAX + SNAP_DISPLAY_TIMING_ROWS];
 #else
-    struct stage2_range ranges[8 + SNAP_DISPLAY_TIMING_ROWS];
+    struct stage2_range ranges[12 + SNAP_DISPLAY_TIMING_ROWS];
 #endif
     unsigned count = 0;
     uint64_t panic_page=p->scratch_pa-SPTM_PANIC_PAGE_SIZE;
@@ -194,6 +194,7 @@ static int vcpu_stage2_prepare(struct context *c, struct vcpu *v)
     ranges[count++] = (struct stage2_range){
         .lo = c->work_base, .hi = c->work_end,
         .low = S2_AP_RO | S2_ATTRS, .upper = S2_XN};
+
     /* Stage 4: the Adreno register windows the guest drives itself, as device
      * memory; every other block of the GPU aperture stays absent (adreno.h). */
     if (p->gpu.flags & ADRENO_F_ENABLE) {

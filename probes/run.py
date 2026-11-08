@@ -30,11 +30,11 @@ Q1N1 = ROOT.parent / 'q1n1'
 sys.path.insert(0, str(Q1N1 / 'tools'))
 import q1n1proxy as q1n1                                            # noqa: E402
 
-LLVM = Path('/opt/homebrew/opt/llvm/bin')
+LLVM = Path(shutil.which('clang')).parent if shutil.which('clang') else Path('/opt/homebrew/opt/llvm/bin')
 # q1n1's Makefile resolves the linker the same way: lld from its own keg
 # when present, otherwise whatever is on PATH.
 LLD = str(Path('/opt/homebrew/opt/lld/bin/ld.lld')) \
-    if Path('/opt/homebrew/opt/lld/bin/ld.lld').exists() else 'ld.lld'
+    if Path('/opt/homebrew/opt/lld/bin/ld.lld').exists() else (shutil.which('ld.lld') or 'ld.lld')
 DEFAULT_DEVICE = None
 FIRMWARE = '/opt/homebrew/share/qemu/edk2-aarch64-code.fd'
 
@@ -55,36 +55,70 @@ class Qemu:
         if not payload.exists():
             raise SystemExit(f'build q1n1 first: make -C {root.parent / "q1n1"} uefi')
         shutil.copyfile(payload, self.esp / 'q1n1.efi')
+        # Remove any BOOTAA64.EFI so EDK2 Shell runs startup.nsh with --uart-proxy
+        (self.esp / 'EFI' / 'BOOT' / 'BOOTAA64.EFI').unlink(missing_ok=True)
         (self.esp / 'startup.nsh').write_text('fs0:\nq1n1.efi --uart-proxy\n')
-        self.sock = f'/tmp/snapintosh-proxy-{os.getpid()}.sock'
+        self.port = 4444
+        self.qmp_port = 4445
+        self.target = f'tcp://127.0.0.1:{self.port}'
         self.log = root / 'build' / 'qemu.log'
         self.proc = None
+        self.qemu_bin = shutil.which('qemu-system-aarch64') or 'str(ROOT.parent / 'qemu' / 'qemu-system-aarch64.exe')'
+        fw = Path(FIRMWARE)
+        if not fw.exists():
+            fw = Path('str(ROOT.parent / 'qemu' / 'share' / 'edk2-aarch64-code.fd')')
+        self.firmware = str(fw)
+
+    def screendump(self, out_path):
+        import json, socket, socket
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.connect(('127.0.0.1', self.qmp_port))
+            f = sock.makefile('rw', encoding='utf-8')
+            greeting = f.readline()
+            f.write('{"execute": "qmp_capabilities"}\n')
+            f.flush()
+            f.readline()
+            cmd = json.dumps({"execute": "screendump", "arguments": {"filename": str(out_path)}}) + '\n'
+            f.write(cmd)
+            f.flush()
+            resp = f.readline()
+            sock.close()
+            return resp
+        except Exception as e:
+            return str(e)
 
     def __enter__(self):
-        Path(self.sock).unlink(missing_ok=True)
+        disp = os.environ.get('SNAP_QEMU_DISPLAY', 'none')
         self.proc = subprocess.Popen(
-            ['qemu-system-aarch64', '-machine', 'virt,virtualization=on,gic-version=3',
+            [str(self.qemu_bin), '-machine', 'virt,virtualization=on,gic-version=3',
              # 4 GiB because xnuboot needs half a gigabyte of contiguous free
              # physical memory for the image, its tables and the handoff, and
              # virt starts RAM at 0x40000000. -cpu max is what supplies FEAT_NV2.
-             '-accel', 'tcg', '-cpu', 'max', '-smp', '1', '-m', '4G',
-             '-bios', FIRMWARE, '-drive', f'format=raw,file=fat:rw:{self.esp}',
+             '-accel', 'tcg,thread=multi,tb-size=1024', '-cpu', 'max', '-smp', '4', '-m', '8G',
+             '-bios', self.firmware, '-drive', f'format=raw,file=fat:rw:{self.esp}',
              # q1n1 refuses to run without a framebuffer; ramfb is what the
              # q1n1 QEMU harness uses.
              '-device', 'ramfb',
-             '-display', 'none', '-monitor', 'none', '-nic', 'none', '-no-reboot',
-             '-chardev', f'socket,id=s,path={self.sock},server=on,wait=off',
+             '-device', 'qemu-xhci',
+             '-device', 'usb-kbd',
+             '-device', 'usb-tablet',
+             '-display', disp, '-nic', 'none', '-no-reboot',
+             '-qmp', f'tcp:127.0.0.1:{self.qmp_port},server=on,wait=off',
+             '-chardev', f'socket,id=s,host=127.0.0.1,port={self.port},server=on,wait=off',
              '-serial', 'chardev:s'],
             stdout=subprocess.DEVNULL, stderr=open(self.log, 'w'))
-        return self.sock
+        return self.target
 
     def __exit__(self, *exc):
         if self.proc and self.proc.poll() is not None:
             print(f'qemu exited early ({self.proc.returncode}); see {self.log}')
         if self.proc:
-            self.proc.terminate()
-            self.proc.wait(timeout=10)
-        Path(self.sock).unlink(missing_ok=True)
+            try:
+                self.proc.kill()
+                self.proc.wait(timeout=3)
+            except Exception:
+                pass
 
 
 def connect(path=None, tries=60):
@@ -1461,10 +1495,18 @@ def run_xnuboot(proxy, info, code, guest_profile='j700ap-26A428',
     if console_mode == 'panel':
         if not host.framebuffer:
             return verdict(EXIT_LOADER, '--console panel requires a framebuffer')
-        xb.BOOT_CMDLINE = xb.BOOT_CMDLINE.replace('serial=3', 'serial=2')
+        if not graphics_boot:
+            xb.BOOT_CMDLINE = xb.BOOT_CMDLINE.replace('serial=3', 'serial=2')
+        else:
+            xb.BOOT_CMDLINE = xb.BOOT_CMDLINE.replace('serial=3', 'serial=1')
     print(f'  console route {console_mode}; host relay {"on" if relay_panel else "off"}')
     if graphics_boot:
-        print('  native graphics boot handoff, verbose text disabled; this is not GUI qualification')
+        xb.BOOT_CMDLINE = xb.BOOT_CMDLINE.replace('-v ', '').replace('-v', '')
+        if '-noprogress' not in xb.BOOT_CMDLINE:
+            xb.BOOT_CMDLINE = f'{xb.BOOT_CMDLINE} -noprogress'
+        # Do NOT add cpus=1; ApplePMGR requires complex < _cpuComplexCount
+        # which fails when cpus=1 reduces _cpuComplexCount to 1 while cluster 1 exists.
+        print(f'  native graphics boot handoff (cmdline: {xb.BOOT_CMDLINE})')
     if os.environ.get('SNAP_PROVOKE'):
         xb.PROVOKE = os.environ['SNAP_PROVOKE']
         print(f'  provoking a panic: withholding {xb.PROVOKE}')
@@ -1636,8 +1678,56 @@ def run_xnuboot(proxy, info, code, guest_profile='j700ap-26A428',
         del chunks[isc_pa]
         print(f'  ISC initialized {isc_size >> 20} MiB locally; '
               f'uploaded {sent / (1 << 20):.2f} MiB of nonzero blocks')
-    for pa, blob in sorted(chunks.items()):
+    cached_bundle = next((f for f in cached_files if 'kernel-bundle.bin' in f['path'].lower()), None)
+    if cached_bundle and not os.environ.get('SNAP_NO_PRELOAD'):
+        start_kb = time.time()
+        bundle_base = cached_bundle['base']
+        header_raw = proxy.readmem(bundle_base, 16)
+        magic, count, _ = struct.unpack('<8sII', header_raw)
+        if magic == b'SNAPKRN1' and count > 0:
+            entries_raw = proxy.readmem(bundle_base + 16, count * 24)
+            for i in range(count):
+                c_pa, c_sz, c_off = struct.unpack_from('<QQQ', entries_raw, i * 24)
+                proxy.memcpy8(c_pa, bundle_base + c_off, c_sz)
+                if c_pa in chunks:
+                    del chunks[c_pa]
+            print(f'  Kernel bundle preload: unpacked {count} chunks ({cached_bundle["size"] / (1 << 20):.1f} MiB) '
+                  f'via in-guest DMA in {time.time() - start_kb:.2f}s; UART bypassed!')
+
+    cached_bundle = next((f for f in cached_files if 'kernel-bundle.bin' in f['path'].lower()), None)
+    if cached_bundle and not os.environ.get('SNAP_NO_PRELOAD'):
+        start_kb = time.time()
+        bundle_base = cached_bundle['base']
+        header_raw = proxy.readmem(bundle_base, 16)
+        magic, count, _ = struct.unpack('<8sII', header_raw)
+        if magic == b'SNAPKRN1' and count > 0:
+            entries_raw = proxy.readmem(bundle_base + 16, count * 24)
+            for i in range(count):
+                c_pa, c_sz, c_off = struct.unpack_from('<QQQ', entries_raw, i * 24)
+                proxy.memcpy8(c_pa, bundle_base + c_off, c_sz)
+                if c_pa in chunks:
+                    del chunks[c_pa]
+            print(f'  Kernel bundle preload: unpacked {count} chunks ({cached_bundle["size"] / (1 << 20):.1f} MiB) '
+                  f'via in-guest DMA in {time.time() - start_kb:.2f}s; UART bypassed!')
+
+    total_bytes = sum(len(blob) for blob in chunks.values())
+    uploaded_bytes = 0
+    chunk_count = len(chunks)
+    print(f'  Uploading {chunk_count} kernel/DT chunks ({total_bytes / (1 << 20):.1f} MiB) into virtual memory...')
+    upload_start = time.time()
+    last_print = 0
+    for idx, (pa, blob) in enumerate(sorted(chunks.items())):
         proxy.writemem(pa, blob)
+        uploaded_bytes += len(blob)
+        now = time.time()
+        if now - last_print >= 2.0 or idx == chunk_count - 1:
+            last_print = now
+            pct = (uploaded_bytes / total_bytes) * 100
+            elapsed = now - upload_start
+            speed = (uploaded_bytes / 1024) / max(elapsed, 0.1)
+            print(f'\r  [Upload {pct:5.1f}%] {uploaded_bytes / (1 << 20):5.1f} / {total_bytes / (1 << 20):.1f} MiB '
+                  f'({idx + 1}/{chunk_count} chunks, {speed:.1f} KB/s)', end='', flush=True)
+    print()
     if ans_range and ans_window:
         # Everything below the SSD's DMA window: state and firmware page zero, the synthesized
         # GPT's head and tail, the SSD params (state zero). The queues q1n1 left running in the
@@ -3133,6 +3223,162 @@ def par_report(par):
     return f'ok  PA {par & 0x000ffffffffff000:#x}'
 
 
+def ppm_to_bmp(ppm_path, bmp_path):
+    try:
+        with open(ppm_path, 'rb') as f:
+            content = f.read()
+        if len(content) < 64:
+            return
+        lines = content.splitlines()
+        header_lines = []
+        body_idx = 0
+        for line in lines:
+            sline = line.strip()
+            if not sline or sline.startswith(b'#'):
+                continue
+            header_lines.append(sline)
+            if len(header_lines) == 3:
+                body_idx = content.find(sline) + len(sline) + 1
+                break
+        if len(header_lines) < 3:
+            return
+        dims = header_lines[1].split()
+        if len(dims) < 2:
+            return
+        w, h = int(dims[0]), int(dims[1])
+        raw = content[body_idx:]
+        row_bytes = w * 3
+        pad = (4 - (row_bytes % 4)) % 4
+        file_size = 54 + (row_bytes + pad) * h
+        hdr = bytearray(54)
+        struct.pack_into('<2sIHHI', hdr, 0, b'BM', file_size, 0, 0, 54)
+        struct.pack_into('<IIIHHIIIIII', hdr, 14, 40, w, h, 1, 24, 0, (row_bytes + pad) * h, 2835, 2835, 0, 0)
+        with open(bmp_path, 'wb') as out:
+            out.write(hdr)
+            for y in range(h - 1, -1, -1):
+                row = raw[y * row_bytes : (y + 1) * row_bytes]
+                if len(row) < row_bytes:
+                    break
+                bgr = bytearray(len(row) + pad)
+                for x in range(w):
+                    bgr[x*3 + 0] = row[x*3 + 2]
+                    bgr[x*3 + 1] = row[x*3 + 1]
+                    bgr[x*3 + 2] = row[x*3 + 0]
+                out.write(bgr)
+    except Exception:
+        pass
+
+
+def bmp_to_png(bmp_path, png_path):
+    try:
+        import zlib
+        with open(bmp_path, 'rb') as f:
+            f.seek(54)
+            raw = f.read()
+        w, h = 800, 600
+        row_bytes = w * 3
+        raw_data = bytearray()
+        for y in range(h):
+            bmp_y = h - 1 - y
+            row = raw[bmp_y * row_bytes : (bmp_y + 1) * row_bytes]
+            raw_data.append(0)
+            for x in range(w):
+                raw_data.append(row[x*3 + 2])
+                raw_data.append(row[x*3 + 1])
+                raw_data.append(row[x*3 + 0])
+        compressed = zlib.compress(bytes(raw_data), 6)
+        def make_chunk(chunk_type, data):
+            crc = zlib.crc32(chunk_type + data) & 0xffffffff
+            return struct.pack('>I', len(data)) + chunk_type + data + struct.pack('>I', crc)
+        png = bytearray(b'\x89PNG\r\n\x1a\n')
+        ihdr = struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)
+        png += make_chunk(b'IHDR', ihdr)
+        png += make_chunk(b'IDAT', compressed)
+        png += make_chunk(b'IEND', b'')
+        with open(png_path, 'wb') as out:
+            out.write(png)
+    except Exception:
+        pass
+
+
+def ppm_to_bmp(ppm_path, bmp_path):
+    try:
+        with open(ppm_path, 'rb') as f:
+            content = f.read()
+        if len(content) < 64:
+            return
+        lines = content.splitlines()
+        header_lines = []
+        body_idx = 0
+        for line in lines:
+            sline = line.strip()
+            if not sline or sline.startswith(b'#'):
+                continue
+            header_lines.append(sline)
+            if len(header_lines) == 3:
+                body_idx = content.find(sline) + len(sline) + 1
+                break
+        if len(header_lines) < 3:
+            return
+        dims = header_lines[1].split()
+        if len(dims) < 2:
+            return
+        w, h = int(dims[0]), int(dims[1])
+        raw = content[body_idx:]
+        row_bytes = w * 3
+        pad = (4 - (row_bytes % 4)) % 4
+        file_size = 54 + (row_bytes + pad) * h
+        hdr = bytearray(54)
+        struct.pack_into('<2sIHHI', hdr, 0, b'BM', file_size, 0, 0, 54)
+        struct.pack_into('<IIIHHIIIIII', hdr, 14, 40, w, h, 1, 24, 0, (row_bytes + pad) * h, 2835, 2835, 0, 0)
+        with open(bmp_path, 'wb') as out:
+            out.write(hdr)
+            for y in range(h - 1, -1, -1):
+                row = raw[y * row_bytes : (y + 1) * row_bytes]
+                if len(row) < row_bytes:
+                    break
+                bgr = bytearray(len(row) + pad)
+                for x in range(w):
+                    bgr[x*3 + 0] = row[x*3 + 2]
+                    bgr[x*3 + 1] = row[x*3 + 1]
+                    bgr[x*3 + 2] = row[x*3 + 0]
+                out.write(bgr)
+    except Exception:
+        pass
+
+
+def bmp_to_png(bmp_path, png_path):
+    try:
+        import zlib
+        with open(bmp_path, 'rb') as f:
+            f.seek(54)
+            raw = f.read()
+        w, h = 800, 600
+        row_bytes = w * 3
+        raw_data = bytearray()
+        for y in range(h):
+            bmp_y = h - 1 - y
+            row = raw[bmp_y * row_bytes : (bmp_y + 1) * row_bytes]
+            raw_data.append(0)
+            for x in range(w):
+                raw_data.append(row[x*3 + 2])
+                raw_data.append(row[x*3 + 1])
+                raw_data.append(row[x*3 + 0])
+        compressed = zlib.compress(bytes(raw_data), 6)
+        def make_chunk(chunk_type, data):
+            crc = zlib.crc32(chunk_type + data) & 0xffffffff
+            return struct.pack('>I', len(data)) + chunk_type + data + struct.pack('>I', crc)
+        png = bytearray(b'\x89PNG\r\n\x1a\n')
+        ihdr = struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)
+        png += make_chunk(b'IHDR', ihdr)
+        png += make_chunk(b'IDAT', compressed)
+        png += make_chunk(b'IEND', b'')
+        with open(png_path, 'wb') as out:
+            out.write(png)
+    except Exception:
+        pass
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('probe', choices=['idregs', 'tgran16', 'tid3', 'shadowmmu',
@@ -3177,11 +3423,63 @@ def main():
 
     blob = build(args.probe, ROOT / 'build')
     if args.qemu:
-        with Qemu(ROOT) as sock:
+        q = Qemu(ROOT)
+        with q as sock:
             proxy = connect(sock)
+            import threading
+            stop_dump = threading.Event()
+            def dump_loop():
+                out_ppm = ROOT / 'build' / 'qemu_screen.ppm'
+                out_bmp = ROOT / 'build' / 'qemu_screen.bmp'
+                out_png = ROOT / 'build' / 'qemu_live.png'
+                v_dir = ROOT / 'build' / 'verified_gui_screenshots'
+                v_dir.mkdir(parents=True, exist_ok=True)
+                art_dir = ROOT / 'build' / 'verified_gui_screenshots'
+                last_hash = None
+                seq = 10
+                tick = 0
+                while not stop_dump.is_set():
+                    stop_dump.wait(3.0)
+                    tick += 1
+                    try:
+                        q.screendump(out_ppm)
+                        if out_ppm.exists():
+                            ppm_to_bmp(out_ppm, out_bmp)
+                            bmp_to_png(out_bmp, out_png)
+                            raw_bytes = out_bmp.read_bytes()
+                            import hashlib
+                            cur_hash = hashlib.sha256(raw_bytes).hexdigest()
+                            if cur_hash != last_hash or tick % 10 == 0:
+                                last_hash = cur_hash
+                                seq += 1
+                                snap_name = f'checkpoint_{seq:02d}_{int(time.time())}.png'
+                                bmp_to_png(out_bmp, v_dir / snap_name)
+                                bmp_to_png(out_bmp, art_dir / snap_name)
+                    except Exception:
+                        pass
+            t = threading.Thread(target=dump_loop, daemon=True)
+            t.start()
             try:
-                return run(proxy, blob, args.probe, 'QEMU -cpu max', boot_options)
+                ret = run(proxy, blob, args.probe, 'QEMU -cpu max', boot_options)
+                stop_dump.set()
+                out_ppm = ROOT / 'build' / 'qemu_screen.ppm'
+                out_bmp = ROOT / 'build' / 'qemu_screen.bmp'
+                out_png = ROOT / 'build' / 'qemu_live.png'
+                q.screendump(out_ppm)
+                if out_ppm.exists():
+                    ppm_to_bmp(out_ppm, out_bmp)
+                    bmp_to_png(out_bmp, out_png)
+                    print(f"Captured screen to {out_bmp}")
+                return ret
             finally:
+                stop_dump.set()
+                out_ppm = ROOT / 'build' / 'qemu_screen.ppm'
+                out_bmp = ROOT / 'build' / 'qemu_screen.bmp'
+                out_png = ROOT / 'build' / 'qemu_live.png'
+                q.screendump(out_ppm)
+                if out_ppm.exists():
+                    ppm_to_bmp(out_ppm, out_bmp)
+                    bmp_to_png(out_bmp, out_png)
                 proxy.link.close()
     proxy = connect(args.device)
     try:

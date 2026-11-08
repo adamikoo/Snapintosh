@@ -186,6 +186,8 @@ PROVOKE = None
 # but this RELEASE kernel's separate kprintf gate still prevents relying on
 # its diagnostics. The profile's memory witness reports actual acquisition.
 FRAMEBUFFER = None
+RAMDISK_PA = None
+RAMDISK_PA = None
 
 # boot_args.Video.v_display. Text mode is the one where XNU's console draws
 # glyphs itself; see build_boot_args().
@@ -478,7 +480,7 @@ def place(base, span=None, guest_span=None):
     # High RAM can be far above the panel. The flat frame map covers that
     # entire physical envelope, including unowned holes. Reserve capacity for
     # the 36-bit IPA range instead of silently overlapping the table arena.
-    large = base + want + BOOTSTRAP_SPAN > 1 << 32 or want > 1 << 30
+    large = base + want + BOOTSTRAP_SPAN > 1 << 32 or want > 512 << 20
     FRAMETABLE_SPAN = 0x02000000 if large else 0x00100000
     FRAMEMAP_OFFSET = FRAMETABLE_OFFSET + FRAMETABLE_SPAN
     FRAMEMAP_SPAN = 0x04000000 if large else 0x00100000
@@ -889,7 +891,7 @@ DIR_SHIFT = 36                  # one directory entry per 64 GiB
 DIR_ENTRIES = 2048
 
 
-def build_frametable(pa, base, span):
+def build_frametable(pa, base, span=None):
     """The three levels, as {physical address: bytes}. Returns (chunks, root)."""
     leaf_bytes = (LEAF_SPAN >> FRAME_SHIFT) * FRAME_ENTRY
     page = 1 << GRANULE
@@ -902,17 +904,27 @@ def build_frametable(pa, base, span):
     level2 = bytearray(page)
     cursor = pa + 2 * page
 
-    first, last = base >> DIR_SHIFT, (base + span - 1) >> DIR_SHIFT
-    if first != last:
-        raise SystemExit('the region straddles a 64 GiB boundary; one level-2 '
-                         'table is not enough')
-    struct.pack_into('<Q', directory, first * 8, pa + page)
+    if isinstance(base, (list, tuple)) and span is None:
+        target_regions = base
+    else:
+        target_regions = [(base, None, span)]
 
-    for offset in range(0, span, LEAF_SPAN):
-        index = ((base + offset) >> 25) & (DIR_ENTRIES - 1)
-        struct.pack_into('<Q', level2, index * 8, cursor)
-        chunks[cursor] = bytes(page)          # every frame untyped
-        cursor += page
+    for r_pa, _, r_span in target_regions:
+        first, last = r_pa >> DIR_SHIFT, (r_pa + r_span - 1) >> DIR_SHIFT
+        if first != 0 or last != 0:
+            raise SystemExit('the region straddles a 64 GiB boundary; one level-2 '
+                             'table is not enough')
+    struct.pack_into('<Q', directory, 0, pa + page)
+
+    populated = set()
+    for r_pa, _, r_span in target_regions:
+        for offset in range(0, r_span, LEAF_SPAN):
+            index = ((r_pa + offset) >> 25) & (DIR_ENTRIES - 1)
+            if index not in populated:
+                populated.add(index)
+                struct.pack_into('<Q', level2, index * 8, cursor)
+                chunks[cursor] = bytes(page)          # every frame untyped
+                cursor += page
     if cursor > pa + FRAMETABLE_SPAN:
         raise SystemExit(f'the frame table needs {cursor - pa:#x}, more than its arena')
 
@@ -2653,6 +2665,28 @@ def build(kernelcache, verbose=False, ramdisk=None, root_hash=None, ramdisk_mode
         print(f'  hide-amx: {len(hide_contract["sites"])} application capability publication sites; '
               'kernel AMXIDR and SME visibility unchanged')
 
+    if os.environ.get('SNAP_SMP') != '1':
+        # In virtual / uniprocessor execution without host SMP release,
+        # secondary CPU start is satisfied by returning KERN_SUCCESS (0) from
+        # processor_start (0xfffffe000b91f04c, file offset 0x491b04c). This avoids
+        # the 1-second timeout panic in processor.c without passing cpus=1
+        # (which breaks ApplePMGR's enableCPUComplex cluster count check).
+        target_off = 0x491b04c
+        if data[target_off:target_off+8] == b'\x7f\x23\x03\xd5\xff\xc3\x01\xd1':
+            data[target_off:target_off+8] = b'\x00\x00\x80\x52\xc0\x03\x5f\xd6'
+            print('  uniprocessor: satisfied secondary CPU release (KERN_SUCCESS)')
+
+    if os.environ.get('SNAP_SMP') != '1':
+        # In virtual / uniprocessor execution without host SMP release,
+        # secondary CPU start is satisfied by returning KERN_SUCCESS (0) from
+        # processor_start (0xfffffe000b91f04c, file offset 0x491b04c). This avoids
+        # the 1-second timeout panic in processor.c without passing cpus=1
+        # (which breaks ApplePMGR's enableCPUComplex cluster count check).
+        target_off = 0x491b04c
+        if data[target_off:target_off+8] == b'\x7f\x23\x03\xd5\xff\xc3\x01\xd1':
+            data[target_off:target_off+8] = b'\x00\x00\x80\x52\xc0\x03\x5f\xd6'
+            print('  uniprocessor: satisfied secondary CPU release (KERN_SUCCESS)')
+
 
     tables = Tables(TABLE_PA)
     chunks = {}
@@ -2713,8 +2747,9 @@ def build(kernelcache, verbose=False, ramdisk=None, root_hash=None, ramdisk_mode
               f'{sep_preload_range[0]:#x}; native DMA/startup still required')
     if ramdisk is not None:
         cmdline = root_cmdline(cmdline, ramdisk_mode)
-        disk_pa = next_payload_pa
-        payload = load_ramdisk(ramdisk, disk_pa, REGION_END)
+        disk_pa = RAMDISK_PA if RAMDISK_PA is not None else next_payload_pa
+        disk_end = (disk_pa + (1024 << 20)) if RAMDISK_PA is not None else REGION_END
+        payload = load_ramdisk(ramdisk, disk_pa, disk_end)
         auxiliary = None
         try:
             if root_hash is not None:
@@ -2897,7 +2932,7 @@ def build(kernelcache, verbose=False, ramdisk=None, root_hash=None, ramdisk_mode
     # -> the cursor at 0xfffffe0007da06c8) and carves pmap_bootstrap's pv page,
     # ptd arena and ASID bitmap from it, so those landed on the same physical
     # pages that back the monitor's fixed region: one memory, two owners.
-    avail_start = max(max(pa + len(b) for pa, b in chunks.items()),
+    avail_start = max(max((pa + len(b) for pa, b in chunks.items() if PHYS_BASE <= pa < REGION_END), default=PHYS_BASE),
                       max(PHYS_BASE + off + span for _, off, span in reservations()))
     avail_start = (avail_start + (1 << GRANULE) - 1) & ~((1 << GRANULE) - 1)
     struct.pack_into('<Q', chunks[HANDOFF_PA], SPTM_AVAIL_START, avail_start)
@@ -3014,9 +3049,10 @@ def build(kernelcache, verbose=False, ramdisk=None, root_hash=None, ramdisk_mode
     # untyped -- which is what all-zero means -- is true.
     ft_span = REGION_SPAN
     for pa, _, span in regions:
-        ft_span = max(ft_span, pa + span - PHYS_BASE)
+        if pa >= PHYS_BASE:
+            ft_span = max(ft_span, pa + span - PHYS_BASE)
     ft_span = (ft_span + LEAF_SPAN - 1) // LEAF_SPAN * LEAF_SPAN
-    ft_chunks, ft_root = build_frametable(FRAMETABLE_PA, PHYS_BASE, ft_span)
+    ft_chunks, ft_root = build_frametable(FRAMETABLE_PA, regions)
     chunks.update(ft_chunks)
     del ft_root                 # nothing consumes the three-level root; see below
 

@@ -62,6 +62,19 @@
 #define ASYNC_FIQ    1
 #define ASYNC_SERROR 2
 
+.macro dbg_block idx, color
+    mov x15, #0xe4800000
+    movz x16, #(\color & 0xffff)
+    movk x16, #(\color >> 16), lsl #16
+    mov x17, #(\idx * 150)
+.Ldbg_\@:
+    str w16, [x15, x17, lsl #2]
+    add x17, x17, #1
+    cmp x17, #((\idx + 1) * 150)
+    b.lo .Ldbg_\@
+    dsb sy
+.endm
+
 .section .text.entry, "ax"
 .globl _start
 _start:
@@ -95,6 +108,16 @@ _start:
     mov x2, x21
     mov x3, x19
     bl xnuboot_setup
+    cbz x0, 1f
+    str x0, [x19, #OUT_STATUS]
+    ldp x27, x28, [sp], #16
+    ldp x25, x26, [sp], #16
+    ldp x23, x24, [sp], #16
+    ldp x21, x22, [sp], #16
+    ldp x19, x20, [sp], #16
+    ldp x29, x30, [sp], #16
+    ret
+1:
     mov x1, sp
     mrs x9, tpidr_el2
     str x1, [x9]                        /* private vcpu.el2_sp, offset 0 */
@@ -109,11 +132,13 @@ _start:
     mov x4, x26
     mov x5, x28
     bl xnuboot_save
+    dbg_block 1, 0x00ffff
 
     /* Vectors first: xnuboot_prepare enables EL1 translation and probes it, and
      * a fault during that has to land somewhere that can report. */
     adr x7, vectors
     msr vbar_el2, x7
+    dbg_block 2, 0x00ff00
     /* RW: AArch64 guest. TVM/TRVM: XNU's MMU registers never reach the hardware
      * in either direction. VM: stage 2.
      *
@@ -139,9 +164,12 @@ _start:
                                          * denied rather than discovered */
     orr x8, x8, #1                      /* VM    */
     orr x8, x8, #(1 << 14)              /* TWE: virtual event stream */
+    dbg_block 3, 0xffff00
     msr hcr_el2, x8
     isb
+    dbg_block 4, 0xff00ff
 
+    dbg_block 5, 0x0088ff
     bl xnuboot_prepare
     str x0, [x19, #OUT_STATUS]
     cbnz x0, exit                       /* negative: the step is in OUT_STATUS */
@@ -188,6 +216,16 @@ _start:
 /* Reached from anywhere, with nothing assumed about the registers or the stack:
  * both come back from the private CPU record through TPIDR_EL2. */
 exit:
+    mov x15, #0xe4800000
+    movz x16, #0x8800
+    movk x16, #0x00ff, lsl #16
+    mov x17, #1500
+.Lexit_loop:
+    str w16, [x15, x17, lsl #2]
+    add x17, x17, #1
+    cmp x17, #2880
+    b.lo .Lexit_loop
+    dsb sy
     pauth_bank_pointer
     bl pauth_switch_leave
     mrs x9, tpidr_el2
@@ -408,10 +446,16 @@ pauth_failed:
     b done
 
 bad:
-    /* Any vector but the guest's synchronous one. Nothing is assumed: the stack
-     * and the out buffer both come back from the private CPU record through TPIDR_EL2,
-     * because this can fire with a frame pushed and registers holding compiler
-     * temporaries. */
+    mov x15, #0xe4800000
+    movz x16, #0x0000
+    movk x16, #0x00ff, lsl #16
+    mov x17, #0
+.Lbad_loop:
+    str w16, [x15, x17, lsl #2]
+    add x17, x17, #1
+    cmp x17, #2880
+    b.lo .Lbad_loop
+    dsb sy
     mrs x9, tpidr_el2
     ldr x19, [x9, #8]                   /* vcpu.out_ptr */
     mrs x0, esr_el2
