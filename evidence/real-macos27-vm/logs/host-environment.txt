@@ -1,0 +1,8 @@
+Host Machine: ASUS Vivobook S 15 (S5507QA)
+SoC: Qualcomm Snapdragon X1 Elite (X1E-78-100)
+Architecture: ARM64 (AArch64) - Oryon v1 (12 cores)
+RAM: 16 GB LPDDR5X (15.6 GB usable)
+Host OS: Microsoft Windows 11 ARM64 Build 26300+
+Storage: Micron 2400 1TB PCIe 4.0 NVMe SSD (PCI\VEN_1344&DEV_5413)
+GPU: Qualcomm Adreno X1-85 (Adreno 750 / gen70500)
+Virtualization Backend: QEMU ARM64 (qemu-system-aarch64) with TCG multi-threading and FEAT_NV2

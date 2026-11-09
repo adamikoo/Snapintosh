@@ -1,0 +1,16 @@
+[Machine]
+Type: Standard ARM64 Virtual Machine (virt)
+Virtualization: Hardware EL2 Enabled (virtualization=on)
+GIC Version: 3 (GICD: 0x08000000, GICR: 0x080A0000)
+vCPUs: 6 cores (cores=6, threads=1, sockets=1)
+vRAM: 6144 MB (6 GiB)
+CPU Model: max,pauth-impdef=on (FEAT_NV2, Pointer Authentication)
+Timer Frequency: 24,000,000 Hz (1:1 with Apple Silicon guest timebase)
+
+[Peripherals]
+Display: RAMFB (Linear Framebuffer 1920x1080 @ 32bpp, stride 7680)
+Input: USB 3.0 XHCI Controller (qemu-xhci) + USB Tablet + USB Keyboard
+Storage Controller: NVMe (Apple ANS2 Emulation, serial=SNAPANS001)
+Virtual Storage Backing: snapintosh_macos.qcow2 (64 GiB sparse capacity)
+Console: PL011 UART (0x09000000)
+Firmware: EDK2 AArch64 UEFI (QEMU_EFI.fd)
