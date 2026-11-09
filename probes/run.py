@@ -63,10 +63,10 @@ class Qemu:
         self.target = f'tcp://127.0.0.1:{self.port}'
         self.log = root / 'build' / 'qemu.log'
         self.proc = None
-        self.qemu_bin = shutil.which('qemu-system-aarch64') or 'str(ROOT.parent / 'qemu' / 'qemu-system-aarch64.exe')'
+        self.qemu_bin = shutil.which('qemu-system-aarch64') or str(ROOT.parent / 'qemu' / 'qemu-system-aarch64.exe')
         fw = Path(FIRMWARE)
         if not fw.exists():
-            fw = Path('str(ROOT.parent / 'qemu' / 'share' / 'edk2-aarch64-code.fd')')
+            fw = ROOT.parent / 'qemu' / 'share' / 'edk2-aarch64-code.fd'
         self.firmware = str(fw)
 
     def screendump(self, out_path):

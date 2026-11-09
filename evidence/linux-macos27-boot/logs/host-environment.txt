@@ -1,0 +1,10 @@
+OS: Ubuntu 24.04.4 LTS (Noble Numbat)
+Kernel: Linux devbox 6.8.0 #1 SMP PREEMPT_DYNAMIC Fri Feb 20 20:38:43 UTC 2026 x86_64
+Host Architecture: x86_64 (GenuineIntel Intel(R) Xeon(R) CPU @ 2.30GHz, 4 vCPUs)
+Virtualization Type: Container / Guest VM under KVM (hypervisor flag present, no nested VMX/SVM exposed)
+KVM Status: /dev/kvm absent (No hardware-assisted KVM virtualization available on host)
+QEMU Binary: qemu-system-aarch64 version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)
+Supported QEMU Accelerators: tcg
+RAM: 7.8 GiB total, 7.0 GiB free
+Storage: 98 GiB total on rootfs overlay, 92 GiB available
+Target Architecture Emulation: AArch64 under QEMU TCG (thread=multi, -cpu max with FEAT_NV2 emulation)

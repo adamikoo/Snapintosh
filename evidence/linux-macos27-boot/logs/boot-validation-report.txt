@@ -1,0 +1,17 @@
+=== AUTOMATED LINUX BOOT VALIDATION HARNESS REPORT ===
+Timestamp: 2026-11-09 18:14:06 UTC
+
+[PASS          ] PREREQ_ENV           : Host Environment and Architecture Audit
+       Evidence: Linux x86_64 Host with QEMU TCG /usr/bin/qemu-system-aarch64
+[PASS          ] QEMU_LAUNCH          : QEMU Virtual Machine Launch under TCG
+       Evidence: PID 1189475, cmd: /usr/bin/qemu-system-aarch64 -machine virt,virtualization=on,gic-version=3 -cpu max,pauth-impdef=on -smp 4 -m 4G -accel tcg,thread=multi -bios /usr/share/qemu-efi-aarch64/QEMU_EFI.fd -device ramfb -device qemu-xhci,id=xhci0 -device usb-tablet,bus=xhci0.0 -device usb-kbd,bus=xhci0.0 -display none -qmp tcp:127.0.0.1:4545,server=on,wait=off -chardev socket,id=s,host=127.0.0.1,port=4546,server=on,wait=off -serial chardev:s
+[PASS          ] FIRMWARE             : EDK2 AArch64 UEFI Firmware Initialization
+       Evidence: Captured firmware frame at /app/evidence/linux-macos27-boot/screenshots/firmware-screen.ppm
+[BLOCKED / FAIL] BOOTLOADER           : q1n1 EFI Loader and EL2 Handoff
+       Evidence: q1n1.efi payload missing (q1n1 submodule/sibling not built)
+[BLOCKED / FAIL] ASSETS_VALIDATION    : macOS 27 Restore Assets Integrity
+       Evidence: Apple macOS restore assets not present locally (legal/CDN distribution)
+[BLOCKED / FAIL] XNU_BOOTSTRAP        : Apple XNU Kernel Bootstrap and Handoff
+       Evidence: Blocked by missing restore assets and AppleGPIOICController.cpp:459 matching
+[BLOCKED / FAIL] GRAPHICAL_SESSION    : WindowServer Graphical Desktop Session
+       Evidence: Blocked by unresolved WindowServer GPIO dependencies

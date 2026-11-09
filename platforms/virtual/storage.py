@@ -40,25 +40,29 @@ class VirtualDiskMetadata:
 class VirtualDiskManager:
     """Manages dedicated virtual disk images for the macOS virtual machine."""
 
-    # Prohibited device paths ensuring strict physical disk isolation
-    PROHIBITED_DEVICE_PREFIXES = (
+    # Prohibited device patterns ensuring strict physical disk isolation
+    PROHIBITED_DEVICE_PATTERNS = (
         r'\\.\physicaldrive',
-        r'\\.\',
+        r'\\.\\',
+        r'\\.',
         '/dev/sd',
         '/dev/nvme',
         '/dev/hd',
         '/dev/disk',
+        'physicaldrive',
     )
 
     @classmethod
     def _assert_safe_path(cls, path: Path) -> Path:
         """Enforces that the path is an ordinary file and never a physical disk device."""
-        resolved = str(path.resolve()).lower()
-        for prohibited in cls.PROHIBITED_DEVICE_PREFIXES:
-            if resolved.startswith(prohibited):
-                raise PermissionError(
-                    f"Physical disk access is strictly prohibited! Blocked device target: {path}"
-                )
+        raw_str = str(path).lower()
+        resolved_str = str(path.resolve()).lower()
+        for s in (raw_str, resolved_str):
+            for prohibited in cls.PROHIBITED_DEVICE_PATTERNS:
+                if s.startswith(prohibited) or prohibited in s:
+                    raise PermissionError(
+                        f"Physical disk access is strictly prohibited! Blocked device target: {path}"
+                    )
         return path
 
     @classmethod
@@ -122,34 +126,26 @@ class VirtualDiskManager:
 
         header = bytearray(104)
         struct.pack_into(
-            '>4sIIQIIQI',
+            '>4sIQIIQIIQQIIQQQQII',
             header, 0,
-            b'QFI\xfb',      # magic
-            3,              # version 3
-            0,              # backing_file_offset
-            0,              # backing_file_size
-            cluster_bits,   # cluster_bits (16 = 64 KiB)
-            capacity_bytes, # virtual size
-            0               # crypt_method
-        )
-        struct.pack_into(
-            '>IQIQIIQ',
-            header, 40,
-            l1_size,        # l1_size
-            cluster_size,   # l1_table_offset (cluster 1)
-            cluster_size * 2, # refcount_table_offset (cluster 2)
-            1,              # refcount_table_clusters
-            0,              # nb_snapshots
-            0               # snapshots_offset
-        )
-        struct.pack_into(
-            '>QQQII',
-            header, 72,
-            0,              # incompatible_features
-            0,              # compatible_features
-            0,              # autoclear_features
-            4,              # refcount_order (16-bit refcount)
-            104             # header_length
+            b'QFI\xfb',          # magic (0..4)
+            3,                  # version 3 (4..8)
+            0,                  # backing_file_offset (8..16)
+            0,                  # backing_file_size (16..20)
+            cluster_bits,       # cluster_bits (20..24)
+            capacity_bytes,     # size (24..32)
+            0,                  # crypt_method (32..36)
+            l1_size,            # l1_size (36..40)
+            cluster_size,       # l1_table_offset (40..48)
+            cluster_size * 2,   # refcount_table_offset (48..56)
+            1,                  # refcount_table_clusters (56..60)
+            0,                  # nb_snapshots (60..64)
+            0,                  # snapshots_offset (64..72)
+            0,                  # incompatible_features (72..80)
+            0,                  # compatible_features (80..88)
+            0,                  # autoclear_features (88..96)
+            4,                  # refcount_order (96..100)
+            104                 # header_length (100..104)
         )
 
         with open(path, 'wb') as f:
@@ -194,10 +190,10 @@ class VirtualDiskManager:
         pre_header[:len(text)] = text
         struct.pack_into('<II', pre_header, 64, 0xBEDA107F, 0x00010001)
 
-        # Main header at offset 68
+        # Main header at offset 72 (VDIHEADER1PLUS)
         struct.pack_into(
             '<III256sIIIIIIQIIII16s16s16s16s',
-            pre_header, 68,
+            pre_header, 72,
             400,            # header_size
             1,              # image_type dynamic
             0,              # image_flags
@@ -314,19 +310,18 @@ ddb.adapterType = "nvme"
             magic_lead = f.read(64)
 
         if magic_lead.startswith(b'QFI\xfb'):
-            # QCOW2
-            version, size = struct.unpack_from('>x4sIQ', magic_lead, 0)[1:]
+            # QCOW2: magic(4), version(4), backing_offset(8), backing_size(4), cluster_bits(4), size(8)
+            version, size = struct.unpack_from('>4xIQIIQ', magic_lead, 0)[0], struct.unpack_from('>4xIQIIQ', magic_lead, 0)[4]
             return VirtualDiskMetadata(
                 path=path, format=DiskFormat.QCOW2, capacity_bytes=size,
                 actual_file_bytes=file_size, sector_size=4096,
                 mode=DiskMode.PERSISTENT, is_sparse=True
             )
         elif magic_lead.startswith(b'<<< Oracle VM VirtualBox Disk Image'):
-            # VDI
+            # VDI: disk size is uint64_t at offset 364
             with open(path, 'rb') as f:
-                f.seek(68)
-                header_data = f.read(150)
-            size = struct.unpack_from('<Q', header_data, 72)[0]
+                f.seek(364)
+                size = struct.unpack('<Q', f.read(8))[0]
             return VirtualDiskMetadata(
                 path=path, format=DiskFormat.VDI, capacity_bytes=size,
                 actual_file_bytes=file_size, sector_size=4096,
@@ -371,19 +366,11 @@ ddb.adapterType = "nvme"
         backing_len = len(backing_path_str.encode('utf-8'))
 
         struct.pack_into(
-            '>4sIIQIIQI',
+            '>4sIQIIQIIQQIIQQQQII',
             header, 0,
             b'QFI\xfb', 3, backing_offset, backing_len,
-            cluster_bits, base_meta.capacity_bytes, 0
-        )
-        struct.pack_into(
-            '>IQIQIIQ',
-            header, 40,
-            l1_size, cluster_size, cluster_size * 2, 1, 0, 0
-        )
-        struct.pack_into(
-            '>QQQII',
-            header, 72,
+            cluster_bits, base_meta.capacity_bytes, 0,
+            l1_size, cluster_size, cluster_size * 2, 1, 0, 0,
             0, 0, 0, 4, 104
         )
 

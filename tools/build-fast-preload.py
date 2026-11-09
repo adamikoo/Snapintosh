@@ -10,7 +10,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, r'str(ROOT.parent / 'q1n1' / 'tools')')
+sys.path.insert(0, str(ROOT.parent / 'q1n1' / 'tools'))
 
 import preload
 

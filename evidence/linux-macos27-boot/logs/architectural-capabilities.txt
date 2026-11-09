@@ -1,0 +1,16 @@
+=== ARCHITECTURAL EXECUTION ENVIRONMENT AUDIT ===
+Host CPU: x86_64 Intel Xeon (4 cores)
+Host /dev/kvm: ABSENT
+KVM AArch64: UNSUPPORTED (x86_64 host cannot execute AArch64 KVM)
+QEMU Execution Mode: TCG (Tiny Code Generator) multi-threaded (-accel tcg,thread=multi)
+Target CPU Profile: -cpu max,pauth-impdef=on
+ARMv8.6-A Hypervisor Extensions (EL2): EMULATED via QEMU TCG
+FEAT_NV2 (Nested Virtualization 2): EMULATED via QEMU TCG (-cpu max)
+Nested Stage-2 Translation: EMULATED via QEMU TCG
+GIC Architecture: GICv3 (gic-version=3)
+Translation Granule: 4KB / 16KB / 64KB supported in TCG
+Pointer Authentication (PAuth): EMULATED via TCG pauth-impdef=on
+Linear Framebuffer Device: ramfb
+Display Controller: virtio-gpu-pci / ramfb
+USB Host Controller: qemu-xhci
+NVMe Controller: nvme (Apple ANS2 emulation layer mapped via host storage)

@@ -1,0 +1,35 @@
+=== SNAPINTOSH BOOT CHAIN AUDIT & DEPENDENCY MAP ===
+
+Stage 1: QEMU Machine Initialization
+- Binary: qemu-system-aarch64
+- Machine: virt,virtualization=on,gic-version=3
+- CPU: -cpu max,pauth-impdef=on
+- Accelerators: tcg (multi-threaded, tb-size=1024)
+- Virtual Peripherals: RAMFB, XHCI USB (keyboard, tablet), PL011 UART, NVMe disk
+
+Stage 2: Firmware & Bootloader Execution
+- Firmware: EDK2 AArch64 UEFI (/usr/share/qemu-efi-aarch64/QEMU_EFI.fd)
+- Bootloader: q1n1 EFI application (q1n1.efi) via ESP startup.nsh
+- Protocol: CDC/NCM or UART Proxy (q1n1proxy) over TCP/serial
+- Privilege: EL2 handoff with virtualization control registers
+
+Stage 3: Snapintosh EL2 Monitor & Stage 2 Translation
+- Subsystems: shadow/mmu.c, shadow/stage2.c, shadow/sprr-view.c, shadow/native-view.c
+- Architectural Dependencies: FEAT_NV2, nested stage-2 translation, translation granule 16KB
+- Emulated Devices: compat/device.c, compat/aic.c, compat/dart.c, compat/sptm.c, compat/txm.c
+
+Stage 4: Apple XNU Kernel Loading & Handoff
+- Assets: kernelcache.release.mac17p, DeviceTree.j700ap, sptm.t8140.release, txm.macosx.release
+- Boot Arguments: -v keepsyms=1 serial=3 debug=0x14e
+- Handoff Stub: probes/xnuboot.S -> xnuboot.c
+
+Stage 5: Driver Matching & Root Volume Mounting
+- Device Tree: /device-tree/arm-io/{gpio0,mtp-gpio,aop-gpio,nub-gpio,smc-gpio}
+- APFS BaseSystem: basesystem-26A428.apfs (attached via IOHDImage / ramdisk mode)
+- Security: AMFI root hash verification via basesystem-26A428.root-hash
+
+Stage 6: Userspace & Graphical Session Transition
+- launchd -> System Services -> WindowServer
+- Blockers / Matching Issues:
+  * AppleGPIOICController (AppleGPIOICController.cpp:459): Requires exact GPIO pin counts, interrupt groups, and AAPL,phandle resolution across /device-tree/arm-io/gpio0 and subordinate controllers. Missing interrupt mappings prevent WindowServer display and input initialization.
+  * Absence of local Apple restore files (kernelcache, basesystem.apfs, DeviceTree) in non-redistributable repository.

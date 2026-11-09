@@ -15,9 +15,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'probes'))
 sys.path.insert(0, str(ROOT / 'tools'))
 
-from platform.virtual.profile import PLATFORM_VIRTUAL_ARM64, VIRTUAL_MACHINE_SPECS
-from platform.shared.apple_contract import SHARED_SPTM_CONTRACT, SHARED_ANS_CONTRACT
-from platform.virtual.storage import VirtualDiskManager, DiskFormat
+from platforms.virtual.profile import PLATFORM_VIRTUAL_ARM64, VIRTUAL_MACHINE_SPECS
+from platforms.shared.apple_contract import SHARED_SPTM_CONTRACT, SHARED_ANS_CONTRACT
+from platforms.virtual.storage import VirtualDiskManager, DiskFormat
 
 
 class VirtualBackendBuilder:
@@ -89,9 +89,9 @@ virtual_disk_file={disk_image_name}
         cls.create_virtual_boot_config(cfg_path, disk_image_name=disk_path.name)
 
         # 3. Generate VirtualBox & VMware companion configs
-        from platform.virtual.virtualbox_appliance import VirtualBoxApplianceBuilder
-        from platform.virtual.vmware_profile import VMwareProfileBuilder
-        from platform.virtual.qemu_runner import QEMURunner, QEMULaunchConfig
+        from platforms.virtual.virtualbox_appliance import VirtualBoxApplianceBuilder
+        from platforms.virtual.vmware_profile import VMwareProfileBuilder
+        from platforms.virtual.qemu_runner import QEMURunner, QEMULaunchConfig
 
         vdi_dummy = work_dir / "snapintosh_macos.vdi"
         vmdk_dummy = work_dir / "snapintosh_macos.vmdk"
